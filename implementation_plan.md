@@ -113,7 +113,7 @@
 
 ---
 
-### 🔹 Phase 6: Interactive Dashboard & Workspace UI
+### 🔹 Phase 6: Interactive Dashboard & Workspace UI-y
 * **Objective:** Provide a sleek, split-screen UI for interactive financial analysis.
 * **Key Deliverables:**
   - **Split Workspace:** Left panel PDF document viewer + right panel AI Chat window.
