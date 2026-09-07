@@ -1,7 +1,8 @@
 from pathlib import Path
-import pdfplumber
+
 import pandas as pd
-from app.ingestion.schemas import ExtractedTable, ParsedPage, ParsedDocument
+import pdfplumber
+from app.ingestion.schemas import ExtractedTable, ParsedDocument, ParsedPage
 
 
 class FinancialPDFParser:
@@ -17,10 +18,7 @@ class FinancialPDFParser:
             return ""
 
         # Remove None values and strip whitespace
-        cleaned_data = [
-            [cell.strip() if cell else "" for cell in row]
-            for row in table_data
-        ]
+        cleaned_data = [[cell.strip() if cell else "" for cell in row] for row in table_data]
 
         header = cleaned_data[0]
         rows = cleaned_data[1:]
@@ -54,22 +52,26 @@ class FinancialPDFParser:
                             markdown_content=md_table,
                             headers=headers,
                             num_rows=len(raw_table),
-                            num_cols=len(raw_table[0]) if raw_table else 0
+                            num_cols=len(raw_table[0]) if raw_table else 0,
                         )
                         extracted_tables.append(table_obj)
-                        markdown_sections.append(f"\n\n### [Table {table_idx + 1} - Page {page_num}]\n{md_table}\n")
+                        markdown_sections.append(
+                            f"\n\n### [Table {table_idx + 1} - Page {page_num}]\n{md_table}\n"
+                        )
 
                 combined_md = "\n".join(markdown_sections)
-                pages.append(ParsedPage(
-                    page_number=page_num,
-                    text_content=page_text,
-                    tables=extracted_tables,
-                    combined_markdown=combined_md
-                ))
+                pages.append(
+                    ParsedPage(
+                        page_number=page_num,
+                        text_content=page_text,
+                        tables=extracted_tables,
+                        combined_markdown=combined_md,
+                    )
+                )
 
         return ParsedDocument(
             filename=self.pdf_path.name,
             total_pages=total_pages,
             metadata={"file_size_bytes": str(self.pdf_path.stat().st_size)},
-            pages=pages
+            pages=pages,
         )

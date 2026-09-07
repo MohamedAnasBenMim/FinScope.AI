@@ -16,3 +16,14 @@ data/chroma_db/*
 .vscode/
 .idea/
 .DS_Store
+
+# Generated application state and tool caches
+data/*.db*
+data/*.heartbeat
+data/models/
+.pytest_cache/
+.ruff_cache/
+*.ses
+**/dist/
+**/node_modules/
+docs/live-workflow.json

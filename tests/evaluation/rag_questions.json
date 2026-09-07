@@ -1,0 +1,14 @@
+[
+  {"question": "Quel est le montant TTC de la facture FAC-2026-001 ?", "expected_answer": "1428.00 EUR", "expected_document": "invoice_fr_01.pdf", "expected_page": 1},
+  {"question": "What is the total of invoice INV-2026-003?", "expected_answer": "1668.00 EUR", "expected_document": "invoice_en_03.docx"},
+  {"question": "Quel est le montant TTC de FAC-2026-002 ?", "expected_answer": "1548.00 EUR", "expected_document": "invoice_scan_fr_02.png"},
+  {"question": "What is the total of invoice INV-2026-004?", "expected_answer": "1788.00 EUR", "expected_document": "invoice_photo_en_04.jpg"},
+  {"question": "What is the total of invoice INV-2026-005?", "expected_answer": "1908.00 EUR", "expected_document": "invoice_en_05.xls", "expected_sheet": "Pricing"},
+  {"question": "Quelle est la validite du devis DEV-2026-002 ?", "expected_answer": "30 jours", "expected_document": "devis_fr_02.xlsx", "expected_sheet": "Pricing"},
+  {"question": "Quel est le montant TTC du devis DEV-2026-001 ?", "expected_answer": "1200.00 EUR", "expected_document": "devis_fr_01.pdf", "expected_page": 1},
+  {"question": "What is the total of quotation DEV-2026-003?", "expected_answer": "1440.00 EUR", "expected_document": "quote_en_03.docx"},
+  {"question": "Quel est le resultat net en 2025 ?", "expected_answer": "250000 EUR", "expected_document": "bilan_fr_01.pdf", "expected_page": 1},
+  {"question": "What was net income in 2024?", "expected_answer": "260000 EUR", "expected_document": "balance_sheet_en_02.xlsx", "expected_sheet": "Balance Sheet"},
+  {"question": "Quel est le chiffre d'affaires en 2023 ?", "expected_answer": "1620000 EUR", "expected_document": "financial_report_fr_03.pdf", "expected_page": 1},
+  {"question": "What was revenue in 2022?", "expected_answer": "1720000 EUR", "expected_document": "financial_statement_en_04.csv"}
+]

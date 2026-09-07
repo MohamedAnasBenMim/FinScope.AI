@@ -1,0 +1,15 @@
+DEVIS: DEV-2026-005
+Fournisseur: Atelier Aurore SARL
+Client: ABC Formation
+Date: 2026-01-01
+Validite: 30 jours
+Valid until: 2026-01-31
+Currency: EUR
+Total HT: 1400.00
+Montant TVA: 280.00
+Montant TTC: 1680.00
+Bon pour accord
+Payment terms: 30 days
+
+Description | Quantity | Unit price | VAT | Amount
+Consulting | 2 | 700.00 | 20% | 1400.00

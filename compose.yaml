@@ -1,0 +1,160 @@
+name: finscope
+
+x-app: &app
+  image: finscope-backend:local
+  build:
+    context: .
+    dockerfile: backend/Dockerfile
+  env_file:
+    - path: .env
+      required: false
+  environment: &environment
+    DATABASE_URL: postgresql+psycopg://finscope:${POSTGRES_PASSWORD:-finscope_local}@postgres:5432/finscope
+    QDRANT_URL: http://qdrant:6333
+    UPLOAD_DIR: /app/data/uploads
+    MODEL_CACHE_DIR: /app/data/models
+    WORKER_HEARTBEAT_PATH: /app/data/worker.heartbeat
+    LLM_BASE_URL: ${LLM_BASE_URL:-http://llm:8080/v1}
+    LLM_MODEL: ${LLM_MODEL:-finscope-local}
+    LLM_PROVIDER: ${LLM_PROVIDER:-local}
+  volumes:
+    - app_data:/app/data
+  init: true
+  restart: unless-stopped
+  security_opt:
+    - no-new-privileges:true
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_DB: finscope
+      POSTGRES_USER: finscope
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-finscope_local}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [CMD-SHELL, "pg_isready -U finscope -d finscope"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  qdrant:
+    image: qdrant/qdrant:v1.17.0
+    ports:
+      - '127.0.0.1:${QDRANT_PORT:-6333}:6333'
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: [CMD-SHELL, "bash -c 'echo > /dev/tcp/127.0.0.1/6333'"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+  ollama:
+    profiles: [ollama]
+    image: ollama/ollama:0.15.6
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: [CMD, ollama, list]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+  model-init:
+    profiles: [ollama]
+    image: ollama/ollama:0.15.6
+    entrypoint: [/bin/sh, -c]
+    command: ['ollama pull "$${MODEL}"']
+    environment:
+      OLLAMA_HOST: http://ollama:11434
+      MODEL: ${OLLAMA_MODEL:-qwen2.5:1.5b}
+    depends_on:
+      ollama:
+        condition: service_healthy
+    restart: on-failure
+  llm:
+    image: ghcr.io/ggml-org/llama.cpp:server-b10015
+    command: ['-hf', 'Qwen/Qwen2.5-0.5B-Instruct-GGUF:Q4_K_M', '--host', '0.0.0.0', '--port', '8080', '-c', '8192', '-t', '4', '--alias', 'finscope-local']
+    environment:
+      LLAMA_CACHE: /models
+    ports:
+      - '127.0.0.1:${LLM_PORT:-8082}:8080'
+    volumes:
+      - llm_data:/models
+    healthcheck:
+      test: [CMD, curl, -fsS, http://localhost:8080/health]
+      interval: 15s
+      timeout: 5s
+      retries: 60
+      start_period: 120s
+    restart: unless-stopped
+  migrate:
+    <<: *app
+    command: [alembic, upgrade, head]
+    restart: 'no'
+    depends_on:
+      postgres:
+        condition: service_healthy
+  backend:
+    <<: *app
+    ports:
+      - '127.0.0.1:${BACKEND_PORT:-8001}:8000'
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      qdrant:
+        condition: service_healthy
+      prepare:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, curl, -fsS, http://localhost:8000/api/health]
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+  worker:
+    <<: *app
+    command: [python, -m, app.worker]
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      qdrant:
+        condition: service_healthy
+      prepare:
+        condition: service_completed_successfully
+    healthcheck:
+      test: [CMD, python, -m, app.worker, --healthcheck]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+  prepare:
+    <<: *app
+    command: [python, -m, scripts.prepare_models]
+    restart: 'no'
+    depends_on:
+      qdrant:
+        condition: service_healthy
+  frontend:
+    build:
+      context: frontend
+    ports:
+      - '127.0.0.1:${FRONTEND_PORT:-8081}:80'
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, wget, -q, --spider, http://127.0.0.1/]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+volumes:
+  app_data:
+  postgres_data:
+  qdrant_data:
+  ollama_data:
+  llm_data:

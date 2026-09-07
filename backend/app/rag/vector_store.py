@@ -1,87 +1,150 @@
-import chromadb
-from chromadb.utils import embedding_functions
-from rank_bm25 import BM25Okapi
-from app.config import settings
+import hashlib
+import logging
+
+from app.config import Settings, settings
+from app.errors import IndexingFailed
 from app.rag.chunker import DocumentChunk
+from app.rag.embeddings import BaseEmbeddingProvider, embedding_provider
+from app.rag.lexical import sparse_vector
+from app.rag.reranker import LexicalEvidenceReranker
+from qdrant_client import QdrantClient, models
+
+logger = logging.getLogger(__name__)
 
 
 class FinancialVectorStore:
-    """Manages persistent ChromaDB vector storage and hybrid search (Vector + BM25)."""
+    def __init__(
+        self,
+        config: Settings | None = None,
+        client: QdrantClient | None = None,
+        embeddings: BaseEmbeddingProvider | None = None,
+    ):
+        self.config = config or settings
+        self.client = client or QdrantClient(
+            url=self.config.QDRANT_URL, api_key=self.config.QDRANT_API_KEY, timeout=30
+        )
+        self.embeddings = embeddings or embedding_provider(self.config)
+        # Same-dimensional model changes must not mix incompatible vectors.
+        fingerprint = hashlib.sha256(
+            f"{self.config.EMBEDDING_PROVIDER}/{self.config.EMBEDDING_MODEL}/{self.embeddings.dimensions}".encode()
+        ).hexdigest()[:12]
+        self.dense_name = f"dense_{fingerprint}"
+        self.collection = self.config.QDRANT_COLLECTION
 
-    def __init__(self, collection_name: str = "financial_docs"):
-        self.client = chromadb.PersistentClient(path=str(settings.CHROMA_DB_DIR))
-        # Use sentence-transformers for fast local embeddings
-        self.embedding_fn = embedding_functions.SentenceTransformerEmbeddingFunction(
-            model_name="all-MiniLM-L6-v2"
-        )
-        self.collection = self.client.get_or_create_collection(
-            name=collection_name,
-            embedding_function=self.embedding_fn
-        )
-        self.bm25 = None
-        self.stored_chunks: list[DocumentChunk] = []
+    def ensure_collection(self):
+        if not self.client.collection_exists(self.collection):
+            try:
+                self.client.create_collection(
+                    self.collection,
+                    vectors_config={
+                        self.dense_name: models.VectorParams(
+                            size=self.embeddings.dimensions, distance=models.Distance.COSINE
+                        )
+                    },
+                    sparse_vectors_config={
+                        "lexical": models.SparseVectorParams(modifier=models.Modifier.IDF)
+                    },
+                )
+            except Exception:
+                # Another API/worker may have created the collection concurrently.
+                if not self.client.collection_exists(self.collection):
+                    raise
+            if not self.config.QDRANT_URL.startswith(":"):
+                for field in ("document_id", "document_type", "sheet_name"):
+                    self.client.create_payload_index(
+                        self.collection, field, models.PayloadSchemaType.KEYWORD, wait=True
+                    )
+        info = self.client.get_collection(self.collection)
+        vectors = info.config.params.vectors
+        if not isinstance(vectors, dict) or self.dense_name not in vectors:
+            raise IndexingFailed(
+                "Collection uses a different embedding model. Set a new QDRANT_COLLECTION and reindex documents."
+            )
 
     def add_chunks(self, chunks: list[DocumentChunk]):
-        """Indexes document chunks into ChromaDB and builds BM25 index."""
         if not chunks:
             return
+        vectors = self.embeddings.embed([chunk.content for chunk in chunks])
+        try:
+            self.ensure_collection()
+            for start in range(0, len(chunks), 32):
+                points = [
+                    models.PointStruct(
+                        id=chunk.chunk_id,
+                        vector={self.dense_name: vectors[i], "lexical": sparse_vector(chunk.content)},
+                        payload={**chunk.metadata, "text": chunk.content, "chunk_id": chunk.chunk_id},
+                    )
+                    for i, chunk in enumerate(chunks[start : start + 32], start)
+                ]
+                self.client.upsert(self.collection, points=points, wait=True)
+        except IndexingFailed:
+            raise
+        except Exception as exc:
+            raise IndexingFailed("Qdrant indexing failed. Check search service readiness.") from exc
 
-        documents = [c.content for c in chunks]
-        ids = [c.chunk_id for c in chunks]
-        metadatas = [
-            {
-                "filename": c.filename,
-                "page_number": c.page_number,
-                "is_table": str(c.is_table),
-                **c.metadata
-            }
-            for c in chunks
-        ]
+    @staticmethod
+    def metadata_filter(
+        document_ids: list[str] | None = None, document_types: list[str] | None = None
+    ) -> models.Filter | None:
+        conditions = []
+        for key, values in (("document_id", document_ids), ("document_type", document_types)):
+            if values:
+                conditions.append(models.FieldCondition(key=key, match=models.MatchAny(any=values)))
+        return models.Filter(must=conditions) if conditions else None
 
-        self.collection.add(
-            documents=documents,
-            ids=ids,
-            metadatas=metadatas
-        )
+    def hybrid_search(
+        self,
+        query: str,
+        top_k: int | None = None,
+        document_ids: list[str] | None = None,
+        document_types: list[str] | None = None,
+        rerank: bool = True,
+    ) -> list[dict]:
+        try:
+            if not self.client.collection_exists(self.collection):
+                return []
+            self.ensure_collection()
+            dense = self.embeddings.embed([query], query=True)[0]
+            sparse = sparse_vector(query)
+            limit = top_k or self.config.RETRIEVAL_TOP_K
+            filters = self.metadata_filter(document_ids, document_types)
+            prefetch = [models.Prefetch(query=dense, using=self.dense_name, filter=filters, limit=limit)]
+            if sparse.indices:
+                prefetch.append(models.Prefetch(query=sparse, using="lexical", filter=filters, limit=limit))
+            response = self.client.query_points(
+                self.collection,
+                prefetch=prefetch,
+                query=models.FusionQuery(fusion=models.Fusion.RRF),
+                query_filter=filters,
+                limit=limit,
+                with_payload=True,
+            )
+            chunks = [
+                {
+                    "content": point.payload["text"],
+                    "metadata": {k: v for k, v in point.payload.items() if k != "text"},
+                    "score": point.score,
+                    "chunk_id": str(point.id),
+                }
+                for point in response.points
+            ]
+            if rerank and self.config.RERANK_ENABLED:
+                chunks = LexicalEvidenceReranker().rerank(query, chunks)
+            return [chunk for chunk in chunks if chunk["score"] >= self.config.MIN_RETRIEVAL_SCORE]
+        except IndexingFailed:
+            raise
+        except Exception as exc:
+            raise IndexingFailed(
+                "Hybrid retrieval failed. Check Qdrant and embedding configuration."
+            ) from exc
 
-        # Build BM25 index for sparse keyword search
-        self.stored_chunks.extend(chunks)
-        corpus = [c.content.lower().split() for c in self.stored_chunks]
-        self.bm25 = BM25Okapi(corpus)
-
-    def hybrid_search(self, query: str, top_k: int = 3) -> list[dict]:
-        """Combines Vector Dense Retrieval + BM25 Keyword Search."""
-        # 1. Dense Vector Search
-        vector_results = self.collection.query(
-            query_texts=[query],
-            n_results=top_k
-        )
-
-        results = []
-        if vector_results and vector_results.get("documents"):
-            for doc, meta in zip(vector_results["documents"][0], vector_results["metadatas"][0]):
-                results.append({
-                    "content": doc,
-                    "metadata": meta,
-                    "search_type": "vector_dense"
-                })
-
-        # 2. Sparse BM25 Search
-        if self.bm25 and len(self.stored_chunks) > 0:
-            tokenized_query = query.lower().split()
-            bm25_scores = self.bm25.get_scores(tokenized_query)
-            top_bm25_indices = sorted(range(len(bm25_scores)), key=lambda i: bm25_scores[i], reverse=True)[:top_k]
-
-            for idx in top_bm25_indices:
-                chunk = self.stored_chunks[idx]
-                results.append({
-                    "content": chunk.content,
-                    "metadata": {
-                        "filename": chunk.filename,
-                        "page_number": chunk.page_number,
-                        "is_table": str(chunk.is_table)
-                    },
-                    "search_type": "bm25_sparse"
-                })
-
-        return results[:top_k]
+    def delete_document(self, document_id: str):
+        try:
+            if self.client.collection_exists(self.collection):
+                self.client.delete(
+                    self.collection,
+                    points_selector=models.FilterSelector(filter=self.metadata_filter([document_id])),
+                    wait=True,
+                )
+        except Exception as exc:
+            raise IndexingFailed("Could not remove document vectors from Qdrant; retry deletion.") from exc
